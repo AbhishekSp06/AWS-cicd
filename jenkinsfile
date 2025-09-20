@@ -1,0 +1,45 @@
+pipeline {
+  agent any
+  tools { maven 'Maven3' jdk 'JDK11' }
+  environment {
+    APP = "myapp"
+    NEXUS_URL = "http://<NEXUS_HOST>/repository/maven-releases/"
+    TOMCAT_HOST = "<TOMCAT_HOST>"
+  }
+  stages {
+    stage('Checkout') { steps { checkout scm } }
+    stage('Build')     { steps { sh 'mvn -B clean package' } }
+    stage('Sonar')     {
+      steps {
+        withCredentials([string(credentialsId:'sonar-token', variable:'SONAR_TOKEN')]) {
+          sh 'mvn sonar:sonar -Dsonar.login=${SONAR_TOKEN}'
+        }
+      }
+    }
+    stage('Publish')   {
+      steps {
+        withCredentials([usernamePassword(credentialsId:'nexus-creds', usernameVariable:'NEXUS_USER', passwordVariable:'NEXUS_PASS')]) {
+          sh 'mvn -B deploy -DaltDeploymentRepository=nexus::default::${NEXUS_URL} -Dusername=${NEXUS_USER} -Dpassword=${NEXUS_PASS}'
+        }
+      }
+    }
+    stage('Deploy')    {
+      steps {
+        withCredentials([usernamePassword(credentialsId:'tomcat-creds', usernameVariable:'TOMCAT_USER', passwordVariable:'TOMCAT_PASS')]) {
+          sh '''
+            ssh deploy@${TOMCAT_HOST} "cp /var/lib/tomcat/webapps/${APP}.war /tmp/${APP}.war.bak.$BUILD_NUMBER || true"
+            curl --fail --upload-file target/${APP}.war "http://${TOMCAT_USER}:${TOMCAT_PASS}@${TOMCAT_HOST}:8080/manager/text/deploy?path=/${APP}&update=true"
+          '''
+        }
+      }
+    }
+  }
+  post {
+    failure {
+      echo 'Build or deploy failed — running rollback'
+      withCredentials([usernamePassword(credentialsId:'tomcat-creds', usernameVariable:'TOMCAT_USER', passwordVariable:'TOMCAT_PASS')]) {
+        sh 'ssh deploy@${TOMCAT_HOST} "cp /tmp/${APP}.war.bak.${BUILD_NUMBER} /var/lib/tomcat/webapps/${APP}.war && sudo systemctl restart tomcat" || true'
+      }
+    }
+  }
+}
